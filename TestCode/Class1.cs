@@ -17,28 +17,44 @@ namespace TestCode
 				}
 			}*/
 
-			byte* buf = null;
-			MMIXSTD.ConsoleRead(buf, 2);
-			MMIXSTD.ConsoleWrite(buf);
+			Dummy(42);
+
+			byte[] buf = MMIXSTD.newarr<byte>(32, sizeof(byte));
+			fixed (byte* bufp = &buf[0])
+			{
+				MMIXSTD.cread(bufp, (ulong)buf.Length);
+				MMIXSTD.cwrite(bufp);
+			}
+			MMIXSTD.delarr(buf);
 		}
 
-		public static unsafe long Atoi(byte[] input)
+		public static int Dummy(int x)
 		{
-			long x = 0L;
-			for (long i = 0L; input[i] >= '0'; i++)
-			{
-				x *= 10L;
-				x += (input[i] - '0');
-			}
 			return x;
 		}
+
+		/*public static ulong Atoi(byte[] input)
+		{
+			ulong x = 0L;
+			for (ulong i = 0L; input[i] >= '0'; i++)
+			{
+				x *= 10L;
+				x += (ulong)(input[i] - (byte)'0');
+			}
+			return x;
+		}*/
 	}
 
-#pragma warning disable CS0626
+#pragma warning disable CS0626, IDE1006
 	public static class MMIXSTD
 	{
-		public extern static unsafe void ConsoleRead(byte* buf, ulong len);
-		public extern static unsafe void ConsoleWrite(byte* buf);
+		public static extern unsafe void cread(byte* buf, ulong buflen);
+		public static extern unsafe void cwrite(byte* buf);
+
+		public static unsafe void* malloc(ulong size) { return null; }
+		public static unsafe void free(void* mem) { }
+		public static extern T[] newarr<T>(ulong size, ulong elemSize);
+		public static extern void delarr<T>(T[] mem);
 	}
-#pragma warning restore CS0626
+#pragma warning restore CS0626, IDE1006
 }

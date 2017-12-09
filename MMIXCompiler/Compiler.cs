@@ -10,6 +10,8 @@ namespace MMIXCompiler
 {
 	class Compiler
 	{
+		const int AddrSize = 8;
+
 		public string Compile(string code)
 		{
 			using (var stream = File.OpenRead("TestCode.dll"))
@@ -22,26 +24,43 @@ namespace MMIXCompiler
 		{
 			var strb = new StringBuilder();
 
+			strb.GenOp("", "LOC", "#100");
+
 			var asm = AssemblyDefinition.ReadAssembly(data);
 			var module = asm.MainModule;
 			foreach (var type in module.Types)
 			{
-				if (type.IsClass && type.Name != "MMIX")
+				if (!type.IsClass)
 					continue;
 
-				strb.GenOp("", "LOC", "#100");
-
-				foreach (var method in type.Methods)
+				if (type.Name == "MMIX")
 				{
-					if (!method.HasBody
-						|| method.IsConstructor
-						|| !method.IsIL
-						|| !method.IsStatic)
-						continue;
+					foreach (var method in type.Methods)
+					{
+						if (!method.HasBody
+							|| method.IsConstructor
+							|| !method.IsIL
+							|| !method.IsStatic)
+							continue;
 
-					strb.Append(GenerateMethod(method));
-					strb.AppendLine();
-					strb.AppendLine();
+						strb.Append(GenerateMethod(method));
+					}
+				}
+				else if (type.Name == "MMIXSTD")
+				{
+					foreach (var method in type.Methods)
+					{
+						if (method.IsConstructor
+							|| !method.IsIL
+							|| !method.IsStatic
+							|| !method.HasBody)
+							continue;
+
+						if (method.Body.CodeSize == 0)
+							GenerateStdLib(strb, method.Name);
+						else
+							strb.Append(GenerateMethod(method));
+					}
 				}
 			}
 
@@ -54,12 +73,11 @@ namespace MMIXCompiler
 
 			strb.GenNopCom(method.Name, "() [] = ?");
 
-			//int stackPtr = endOffset - 1;
-
 			var stack = CalcStack(method);
 
-			//int stackIndex = stack.EndIndex;
-			//int stackPtr = stack.EndOffset - 1;
+			GenerateMethodStart(strb, stack);
+
+			bool doesCall = false;
 
 			var hasInJump = new HashSet<Instruction>();
 			foreach (var instruct in method.Body.Instructions)
@@ -68,6 +86,9 @@ namespace MMIXCompiler
 				{
 					hasInJump.Add(target);
 				}
+
+				if (instruct.OpCode.Code == Code.Call)
+					doesCall = true;
 			}
 
 			foreach (var instruct in method.Body.Instructions)
@@ -88,7 +109,8 @@ namespace MMIXCompiler
 				case Code.Ldarg_2:
 				case Code.Ldarg_3:
 				case Code.Ldarg_S:
-					int ldargIndex = code == Code.Ldarga_S ? ((VariableDefinition)instruct.Operand).Index : ci - 2;
+				case Code.Ldarg:
+					int ldargIndex = code > Code.Ldarg_3 ? ((VariableReference)instruct.Operand).Index : ci - 2;
 					stack.Push(method.Parameters[ldargIndex].ParameterType);
 					PushStack(strb, lbl, stack, stack.Parameter, ldargIndex);
 					break;
@@ -97,7 +119,8 @@ namespace MMIXCompiler
 				case Code.Ldloc_2:
 				case Code.Ldloc_3:
 				case Code.Ldloc_S:
-					int ldlocIndex = code == Code.Ldloc_S ? ((VariableDefinition)instruct.Operand).Index : ci - 6;
+				case Code.Ldloc:
+					int ldlocIndex = code > Code.Ldloc_3 ? ((VariableReference)instruct.Operand).Index : ci - 6;
 					stack.Push(method.Body.Variables[ldlocIndex].VariableType);
 					PushStack(strb, lbl, stack, stack.Locals, ldlocIndex);
 					break;
@@ -106,17 +129,26 @@ namespace MMIXCompiler
 				case Code.Stloc_2:
 				case Code.Stloc_3:
 				case Code.Stloc_S:
-					int stlocIndex = code == Code.Stloc_S ? ((VariableDefinition)instruct.Operand).Index : ci - 10;
+				case Code.Stloc:
+					int stlocIndex = code > Code.Stloc_3 ? ((VariableReference)instruct.Operand).Index : ci - 10;
 					PopStack(strb, lbl, stack, stack.Locals, stlocIndex);
 					stack.Pop();
 					break;
-				case Code.Ldarga_S: Nop(instruct, strb); break;
+				case Code.Ldarga_S:
+				case Code.Ldarga: Nop(instruct, strb); break;
 				case Code.Starg_S:
-					int stargIndex = ((VariableDefinition)instruct.Operand).Index;
+				case Code.Starg:
+					int stargIndex = ((VariableReference)instruct.Operand).Index;
 					PopStack(strb, lbl, stack, stack.Parameter, stargIndex);
 					stack.Pop();
 					break;
-				case Code.Ldloca_S: Nop(instruct, strb); break;
+				case Code.Ldloca_S:
+				case Code.Ldloca:
+					int ldlocaIndex = ((VariableReference)instruct.Operand).Index;
+					stack.PushManual(1); // TODO
+					strb.GenOp(lbl, "GET", stack.Reg(), "rO");
+					strb.GenOp(lbl, "ADD", stack.Reg(), stack.Reg(), (stack.Locals.ElementOffset[ldlocaIndex] * AddrSize).ToString());
+					break;
 				case Code.Ldnull:
 					stack.PushManual(1); // TODO
 					strb.GenOp(lbl, "SET", stack.Reg(), "0");
@@ -149,28 +181,44 @@ namespace MMIXCompiler
 					break;
 				case Code.Jmp: Nop(instruct, strb); break;
 				case Code.Call:
-					var callMethod = (MethodDefinition)instruct.Operand;
-					strb.GenOp(lbl, "PUSHJ", stack.EndOffset.Reg(), callMethod.Name);
+					var callMethod = (MethodReference)instruct.Operand;
+					int callParamSize = callMethod.Parameters.Sum(x => GetSize(x.ParameterType));
+					int callStart = stack.RegNum() - callParamSize;
+					StackMove(strb, callStart + 1, callStart + 2, callParamSize);
+					reg1 = (callStart + 1).Reg();
 					stack.Pop(callMethod.Parameters.Count);
+					strb.GenOp(lbl, "PUSHJ", reg1, callMethod.Name);
+					stack.Push(callMethod.ReturnType);
 					break;
 				case Code.Calli: Nop(instruct, strb); break;
 				case Code.Ret:
-					if (stack.Return.Count == 0)
+					if (stack.Return.Count <= 0)
 					{
 						if (method.Name == "Main")
 						{
-							strb.GenOp("", "SET", 255.Reg(), "0");
+							strb.GenOp(lbl, "SET", 255.Reg(), "0");
 							strb.GenOp("", "TRAP", "0", "Halt", "0");
 						}
 						else
+						{
 							strb.GenOp(lbl, "POP");
+						}
 					}
-					else if (stack.Return.Count == 1)
+					else
 					{
-						PopStack(strb, lbl, stack, stack.Return, 0);
-						strb.GenOp(lbl, "POP", stack.Return.Count.ToString(), "0");
+						strb.GenNop(lbl);
+						// we have to copy the return registers this way (s = stackptr)
+						// addr: value <- from
+						//    0:     1 <- s-3
+						//    1:     2 <- s-2
+						//    2:     3 <- s-1
+						//    3:     0 <- s-0
+
+						// move // 3: 0 <- s-0
+						StackMove(strb, stack.DynEndOffset - 1, stack.Return.BlockOffset + stack.Return.BlockSize - 1, 1);
+						StackMove(strb, stack.DynEndOffset - stack.Return.BlockSize - 1, stack.Return.BlockOffset, stack.Return.BlockSize - 1);
+						strb.GenOp("", "POP", stack.Return.ElementSize[0].ToString(), "0");
 					}
-					else Nop(instruct, strb);
 					stack.Pop(stack.Return.Count);
 					// TODO CHECK STACK == 0
 					break;
@@ -264,7 +312,6 @@ namespace MMIXCompiler
 				case Code.Ldind_R4: Nop(instruct, strb); break;
 				case Code.Ldind_R8: Nop(instruct, strb); break;
 				case Code.Ldind_Ref: goto case Code.Ldind_I;
-				case Code.Stind_Ref: goto case Code.Stind_I;
 				case Code.Stind_I1:
 				case Code.Stind_I2:
 				case Code.Stind_I4:
@@ -273,8 +320,10 @@ namespace MMIXCompiler
 					reg2 = stack.PopReg();
 					strb.GenOp(lbl, "ST" + GetFamiliar(code), reg1, reg2);
 					break;
+				case Code.Stind_I: goto case Code.Stind_I8;
 				case Code.Stind_R4: Nop(instruct, strb); break;
 				case Code.Stind_R8: Nop(instruct, strb); break;
+				case Code.Stind_Ref: goto case Code.Stind_I;
 				case Code.Add:
 					strb.GenOp(lbl, "ADD", stack.Reg(1), stack.Reg(1), stack.Reg());
 					stack.Pop(2);
@@ -363,7 +412,7 @@ namespace MMIXCompiler
 					stack.PushManual(1); // TODO
 					break;
 				case Code.Conv_I4:
-					strb.GenOp(lbl, "AND", stack.Reg(), stack.Reg(), 0xFFFF_FFFFL.ToString());
+					//strb.GenOp(lbl, "AND", stack.Reg(), stack.Reg(), 0xFFFF_FFFFL.ToString());
 					stack.Pop(1);
 					stack.PushManual(1); // TODO
 					break;
@@ -383,7 +432,7 @@ namespace MMIXCompiler
 					stack.PushManual(1); // TODO
 					break;
 				case Code.Conv_U4:
-					strb.GenOp(lbl, "AND", stack.Reg(), stack.Reg(), 0xFFFF_FFFFL.ToString());
+					//strb.GenOp(lbl, "AND", stack.Reg(), stack.Reg(), 0xFFFF_FFFFL.ToString());
 					stack.Pop(1);
 					stack.PushManual(1); // TODO
 					break;
@@ -426,11 +475,19 @@ namespace MMIXCompiler
 				case Code.Box: Nop(instruct, strb); break;
 				case Code.Newarr: Nop(instruct, strb); break;
 				case Code.Ldlen:
-					strb.GenOp(lbl, "SET", (stack.RegNum() - 1).Reg(), stack.Reg());
-					stack.Pop(1);
+					reg1 = stack.PopReg();
 					stack.PushManual(1); // TODO
+					strb.GenOp(lbl, "SUB", reg1, reg1, "8");
+					strb.GenOp("", "LDO", reg1, reg1);
 					break;
-				case Code.Ldelema: Nop(instruct, strb); break;
+				case Code.Ldelema:
+					reg1 = stack.PopReg();
+					//reg2 = stack.PopReg(); // array
+					//stack.PushManual(1); // TODO
+
+					//TODO
+					//int ldelemaSize = GetSize((TypeReference)instruct.Operand);
+					break;
 				/* Array read access
 				 * ( 0) index
 				 * (-1) array [ 0:ptr 1:len ]
@@ -443,7 +500,7 @@ namespace MMIXCompiler
 				case Code.Ldelem_U4:
 				case Code.Ldelem_I8:
 					reg1 = stack.PopReg(); // index
-					reg2 = stack.PopReg(0); // array.ptr
+					reg2 = stack.PopReg(); // array
 					stack.PushManual(1); // TODO
 					strb.GenOp(lbl, "LD" + GetFamiliar(code), stack.Reg(), reg2, reg1);
 					break;
@@ -454,7 +511,7 @@ namespace MMIXCompiler
 				/* Array write access
 				 * ( 0) value
 				 * (-1) index
-				 * (-2) array [ 0:ptr 1:len ]
+				 * (-2) array
 				 */
 				case Code.Stelem_I: goto case Code.Stelem_I8;
 				case Code.Stelem_I1:
@@ -463,7 +520,7 @@ namespace MMIXCompiler
 				case Code.Stelem_I8:
 					reg1 = stack.PopReg(); // value
 					reg2 = stack.PopReg(); // index
-					reg3 = stack.PopReg(0); // array.ptr
+					reg3 = stack.PopReg(); // array
 					strb.GenOp(lbl, "ST" + GetFamiliar(code), reg1, reg3, reg2);
 					stack.Pop(3);
 					break;
@@ -496,7 +553,6 @@ namespace MMIXCompiler
 				case Code.Endfinally: Nop(instruct, strb); break;
 				case Code.Leave: Nop(instruct, strb); break;
 				case Code.Leave_S: Nop(instruct, strb); break;
-				case Code.Stind_I: goto case Code.Stind_I8;
 				case Code.Arglist: Nop(instruct, strb); break;
 				case Code.Ceq:
 					strb.GenOp(lbl, "CMP", stack.Reg(1), stack.Reg(1), stack.Reg());
@@ -530,12 +586,6 @@ namespace MMIXCompiler
 					break;
 				case Code.Ldftn: Nop(instruct, strb); break;
 				case Code.Ldvirtftn: Nop(instruct, strb); break;
-				case Code.Ldarg: Nop(instruct, strb); break;
-				case Code.Ldarga: Nop(instruct, strb); break;
-				case Code.Starg: Nop(instruct, strb); break;
-				case Code.Ldloc: Nop(instruct, strb); break;
-				case Code.Ldloca: Nop(instruct, strb); break;
-				case Code.Stloc: Nop(instruct, strb); break;
 				case Code.Localloc: Nop(instruct, strb); break;
 				case Code.Endfilter: Nop(instruct, strb); break;
 				case Code.Unaligned: Nop(instruct, strb); break;
@@ -554,6 +604,7 @@ namespace MMIXCompiler
 				}
 			}
 
+			strb.AppendLine();
 			return strb.ToString();
 		}
 
@@ -576,6 +627,27 @@ namespace MMIXCompiler
 				strb.GenOp(i == 0 ? lbl : "", "SET",
 					block.Reg(index, i),
 					stack.Reg(0, i));
+			}
+		}
+
+		public static void StackMove(StringBuilder strb, int from, int to, int length)
+		{
+			if (length <= 0 || from == to)
+				return;
+
+			if (to > from)
+			{
+				for (int i = 0; i < length; i++)
+				{
+					strb.GenOp("", "SET", (to + length - (i + 1)).Reg(), (from + length - (i + 1)).Reg());
+				}
+			}
+			else
+			{
+				for (int i = 0; i < length; i++)
+				{
+					strb.GenOp("", "SET", (to + i).Reg(), (from + i).Reg());
+				}
 			}
 		}
 
@@ -604,48 +676,50 @@ namespace MMIXCompiler
 			stack.Locals.ElementOffset = new int[stack.Locals.Count];
 
 			//stack.End.Count = 0;
-			stack.EndIndex = stack.Locals.IndexStart + stack.Locals.Count;
+			stack.FixedEndIndex = stack.Locals.IndexStart + stack.Locals.Count;
 
-			stack.CumulativeOffset = new int[stack.EndIndex];
-			stack.AbsElementSize = new int[stack.EndIndex];
+			stack.CumulativeOffset = new int[stack.FixedEndIndex];
+			stack.AbsElementSize = new int[stack.FixedEndIndex];
 
 			int gOff = 0;
 			int cum = 0;
 			AccumulateStack(ref gOff, ref cum, stack, stack.Return);
 			AccumulateStack(ref gOff, ref cum, stack, stack.Parameter);
 			AccumulateStack(ref gOff, ref cum, stack, stack.Locals);
-			stack.EndOffset = gOff;
 
-			stack.Index = stack.EndIndex - 1;
+			stack.FixedEndOffset = cum;
+			stack.Index = stack.FixedEndIndex - 1;
 
 			return stack;
 		}
 
 		private static void AccumulateStack(ref int gOff, ref int cum, Stack stack, StackBlock block)
 		{
+			block.BlockOffset = gOff;
+			int localSize = 0;
 			for (int i = 0; i < block.ElementOffset.Length; i++)
 			{
 				block.ElementOffset[i] = cum;
 				stack.CumulativeOffset[gOff] = cum;
 				cum += block.ElementSize[i];
+				localSize += block.ElementSize[i];
 				stack.AbsElementSize[gOff] = block.ElementSize[i];
 				gOff++;
 			}
+			block.BlockSize = localSize;
 		}
 
 		public static int GetSize(TypeReference type)
 		{
 			if (type.FullName == "System.Void")
 				return 0;
-			if (type.IsArray)
-				return 2;
 			return 1;
 		}
 
 		private void Nop(Instruction instruction, StringBuilder strb)
 		{
-			strb.AppendLine("% Unknown: " + instruction.OpCode.Name);
-			//throw new NotImplementedException();
+			//strb.AppendLine("% Unknown: " + instruction.OpCode.Name);
+			throw new NotImplementedException();
 		}
 
 		public static string Label(MethodDefinition method, Instruction instruction)
@@ -667,6 +741,59 @@ namespace MMIXCompiler
 			//if (name.Contains("_I")) return "O";
 			throw new InvalidOperationException();
 		}
+
+		private static void GenerateStdLib(StringBuilder strb, string name)
+		{
+			switch (name)
+			{
+			case "cread":
+				strb.GenOp("cread", "SET", 255.Reg(), 0.Reg());
+				strb.GenOp("", "TRAP", "0", "Fgets", "StdIn");
+				strb.GenOp("", "POP", "1", "0");
+				break;
+
+			case "cwrite":
+				strb.GenNop("cwrite"); // 0: arrptr 1: len
+				strb.GenOp("", "GET", 255.Reg(), "rO");
+				strb.GenOp("", "TRAP", "0", "Fputs", "StdOut");
+				strb.GenOp("", "POP");
+				break;
+
+			case "newarr":
+				strb.GenNop("newarr"); // 0: size 1: elemsz
+				strb.GenOp("", "GET", 2.Reg(), "rJ");
+				strb.GenOp("", "MUL", 4.Reg(), 0.Reg(), 1.Reg());
+				strb.GenOp("", "ADD", 4.Reg(), 4.Reg(), "8");
+				strb.GenOp("", "PUSHJ", 3.Reg(), "malloc");
+				strb.GenOp("", "ADD", 0.Reg(), 3.Reg(), "8");
+				strb.GenOp("", "PUT", "rJ", 2.Reg());
+				strb.GenOp("", "POP", "1", "0");
+				break;
+
+			case "delarr":
+				strb.GenNop("delarr"); // 0: ptr
+				strb.GenOp("", "GET", 2.Reg(), "rJ");
+				strb.GenOp("", "SUB", 4.Reg(), 4.Reg(), "8");
+				strb.GenOp("", "PUSHJ", 3.Reg(), "free");
+				strb.GenOp("", "SET", 0.Reg(), 3.Reg());
+				strb.GenOp("", "PUT", "rJ", 2.Reg());
+				strb.GenOp("", "POP");
+				break;
+
+			default:
+				throw new InvalidOperationException();
+			}
+		}
+
+		private void GenerateMethodStart(StringBuilder strb, Stack stack)
+		{
+			var returnSize = stack.Return.BlockSize;
+			if (returnSize == 0)
+				return;
+
+			// moves incomming parameter (offset 0) into the reserved parameter block
+			StackMove(strb, 0, stack.Parameter.BlockOffset, stack.Parameter.BlockSize);
+		}
 	}
 
 	class Stack
@@ -682,8 +809,10 @@ namespace MMIXCompiler
 		public StackBlock Parameter { get; set; }
 		public StackBlock Locals { get; set; }
 
-		public int EndIndex { get; set; }
-		public int EndOffset { get; set; }
+		public int FixedEndIndex { get; set; }
+		public int FixedEndOffset { get; set; }
+
+		public int DynEndOffset => DynStackOffset.Count > 0 ? (DynStackOffset.Peek() + DynStackSize.Peek()) : FixedEndOffset;
 
 		public void Push(TypeReference type)
 		{
@@ -692,10 +821,11 @@ namespace MMIXCompiler
 
 		public void PushManual(int itemSize)
 		{
-			int prevSize = DynStackSize.Count > 0 ? DynStackSize.Peek() : 0;
+			if (itemSize == 0)
+				return;
+
 			DynStackSize.Push(itemSize);
-			int prevOffset = DynStackOffset.Count > 0 ? DynStackOffset.Peek() : EndOffset;
-			DynStackOffset.Push(prevOffset + prevSize);
+			DynStackOffset.Push(DynEndOffset);
 			Index++;
 		}
 
@@ -722,10 +852,10 @@ namespace MMIXCompiler
 		public int RegNum(int sub = 0, int elem = 0)
 		{
 			int acc = Index - sub;
-			if (acc < EndIndex)
+			if (acc < FixedEndIndex)
 				throw new InvalidOperationException("Stack accessing fixed registers");
 			else
-				return DynStackOffset.Reverse().ElementAt(acc - EndIndex) + elem;
+				return DynStackOffset.Reverse().ElementAt(acc - FixedEndIndex) + elem;
 		}
 		public string Reg(int sub = 0, int elem = 0) => $"${RegNum(sub, elem)}";
 	}
@@ -735,8 +865,8 @@ namespace MMIXCompiler
 		public int IndexStart { get; set; }
 		public int Count => ElementSize.Length;
 
-		//public int Offset { get; set; }
-		//public int Size { get; set; }
+		public int BlockOffset { get; set; }
+		public int BlockSize { get; set; }
 
 		// Absolute offset
 		public int[] ElementOffset { get; set; }
