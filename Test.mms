@@ -1,8 +1,14 @@
+        LOC     Data_Segment
+        GREG    @
+InputE  OCTA    0
+
  LOC #100
 Main SWYM % () [] = ?
  SET $2,42
  SET $3,$2
+ GET $255,rO
  PUSHJ $2,Dummy
+ GET $255,rO
  SET $2,32
  SET $3,1
  SET $4,$3
@@ -31,13 +37,17 @@ Main SWYM % () [] = ?
  TRAP 0,Halt,0
 
 Dummy SWYM % () [] = ?
+ GET $255,rO
  POP
 
-cread SET $255,$0
+cread SWYM
+ GET $255,rO
+ STO $0,$255,0
+ STO $1,$255,8
  TRAP 0,Fgets,StdIn
  POP 1,0
 cwrite SWYM
- GET $255,rO
+ SET $255,$0
  TRAP 0,Fputs,StdOut
  POP
 malloc SWYM % () [] = ?
@@ -57,6 +67,9 @@ newarr SWYM
  MUL $4,$0,$1
  ADD $4,$4,8
  PUSHJ $3,malloc
+ LDA $3,InputE
+ SET $0,32
+ STO $0,$3,0
  ADD $0,$3,8
  PUT rJ,$2
  POP 1,0

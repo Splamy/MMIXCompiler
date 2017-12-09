@@ -747,14 +747,16 @@ namespace MMIXCompiler
 			switch (name)
 			{
 			case "cread":
-				strb.GenOp("cread", "SET", 255.Reg(), 0.Reg());
+				strb.GenNop("cread"); // 0: arrptr, 1: buflen
+				strb.GenOp("", "STO", 0.Reg(), 255.Reg(), "0");
+				strb.GenOp("", "STO", 1.Reg(), 255.Reg(), "8");
 				strb.GenOp("", "TRAP", "0", "Fgets", "StdIn");
 				strb.GenOp("", "POP", "1", "0");
 				break;
 
 			case "cwrite":
-				strb.GenNop("cwrite"); // 0: arrptr 1: len
-				strb.GenOp("", "GET", 255.Reg(), "rO");
+				strb.GenNop("cwrite"); // 0: arrptr
+				strb.GenOp("", "GET", 255.Reg(), 0.Reg());
 				strb.GenOp("", "TRAP", "0", "Fputs", "StdOut");
 				strb.GenOp("", "POP");
 				break;
@@ -765,6 +767,7 @@ namespace MMIXCompiler
 				strb.GenOp("", "MUL", 4.Reg(), 0.Reg(), 1.Reg());
 				strb.GenOp("", "ADD", 4.Reg(), 4.Reg(), "8");
 				strb.GenOp("", "PUSHJ", 3.Reg(), "malloc");
+				strb.GenOp("", "STO", 0.Reg(), 3.Reg(), "0");
 				strb.GenOp("", "ADD", 0.Reg(), 3.Reg(), "8");
 				strb.GenOp("", "PUT", "rJ", 2.Reg());
 				strb.GenOp("", "POP", "1", "0");
@@ -785,7 +788,7 @@ namespace MMIXCompiler
 			}
 		}
 
-		private void GenerateMethodStart(StringBuilder strb, Stack stack)
+		private static void GenerateMethodStart(StringBuilder strb, Stack stack)
 		{
 			var returnSize = stack.Return.BlockSize;
 			if (returnSize == 0)
