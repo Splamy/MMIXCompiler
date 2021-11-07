@@ -1,4 +1,4 @@
-using Mono.Cecil;
+﻿using Mono.Cecil;
 using Mono.Cecil.Cil;
 using System;
 using System.Collections.Generic;
@@ -17,12 +17,10 @@ namespace MMIXCompiler
 		private const int AddrSize = 8;
 		public const bool debug = true;
 
-		public Size StaticHeapUsed;
-		public List<(Size address, Size size, string label, ulong value)> StaticHeapAllocation
-			= new List<(Size address, Size size, string label, ulong value)>();
-		public static Dictionary<string, string> StaticFields = new Dictionary<string, string>();
-		public static Dictionary<string, Size> TypeSizes = new Dictionary<string, Size>();
-		public static Dictionary<string, Size> FieldOffsets = new Dictionary<string, Size>();
+		public Size StaticHeapOffset;
+		public static Dictionary<string, StaticAllocation> StaticFields = new();
+		public static Dictionary<string, Size> TypeSizes = new();
+		public static Dictionary<string, Size> FieldOffsets = new();
 
 		public static TypeReference primBool;
 		public static TypeReference primI8;
@@ -36,20 +34,12 @@ namespace MMIXCompiler
 		public static TypeReference primPtr;
 		public static TypeReference primArr;
 
-		public string Compile(string code)
+		public string Compile(Stream data)
 		{
-			StaticHeapUsed = Size.FromBytes(100);
-			StaticHeapAllocation.Clear();
+			StaticHeapOffset = PoolSegment;
+			StaticFields.Clear();
 			TypeSizes.Clear();
 
-			using (var stream = File.OpenRead("TestCode.dll"))
-			{
-				return LoadBinData(stream);
-			}
-		}
-
-		public string LoadBinData(Stream data)
-		{
 			var strb = new StringBuilder();
 
 			var asm = AssemblyDefinition.ReadAssembly(data);
@@ -95,41 +85,51 @@ namespace MMIXCompiler
 			var content = strb.ToString();
 			strb.Clear();
 
-			strb.GenOp("", "LOC", $"#{StaticHeapUsed.Bytes8}");
+			strb.GenOp("", "LOC", $"#{0}");
 			strb.Append(content);
 
-			strb.GenOp("", "LOC", "Data_Segment");
-			strb.GenOp("", "GREG", "@");
-			Size dataAddress = DataSegment;
-			foreach (var staticItem in StaticHeapAllocation.OrderBy(x => x.address.Bytes))
-			{
-				if (dataAddress != staticItem.address)
-					strb.GenOp("", "LOC", (staticItem.address + DataSegment).ToString());
-				strb.GenOp(staticItem.label, "OCTA", staticItem.value.ToString());
-				dataAddress = staticItem.address + staticItem.size;
-			}
+			//strb.GenOp("", "LOC", "Data_Segment");
+			//strb.GenOp("", "GREG", "@");
+			//Size dataAddress = DataSegment;
+			//foreach (var staticItem in StaticHeapAllocation.OrderBy(x => x.address.Bytes))
+			//{
+			//	if (dataAddress != staticItem.address)
+			//		strb.GenOp("", "LOC", (staticItem.address + DataSegment).ToString());
+			//	strb.GenOp(staticItem.label, "OCTA", staticItem.value.ToString());
+			//	dataAddress = staticItem.address + staticItem.size;
+			//}
 
 			return strb.ToString();
 		}
 
-		public void ReserveStaticFields(TypeDefinition type)
+		//public void ReserveStaticFields(TypeDefinition type)
+		//{
+		//	foreach (var sfld in type.Fields)
+		//	{
+		//		if (sfld.IsStatic)
+		//		{
+		//			var size = GetSize(sfld.FieldType);
+		//			ReserveStaticHeap(size);
+		//		}
+		//	}
+		//}
+
+		public Size GetStaticFieldAddress(FieldDefinition field) // -> label
 		{
-			foreach (var sfld in type.Fields)
+			if (!StaticFields.TryGetValue(field.FullName, out var alloc))
 			{
-				if (sfld.IsStatic)
-				{
-					var size = GetSize(sfld.FieldType);
-					ReserveStaticHeap(size);
-				}
+				var size = GetSize(field.FieldType);
+				alloc = new StaticAllocation(StaticHeapOffset, size, "", 0);
+				StaticFields.Add(field.FullName, alloc);
+				StaticHeapOffset += size;
 			}
+			return alloc.address;
 		}
 
-		public string ReserveStaticHeap(Size size, ulong? value = null) // -> label
+		public void ReserveStaticHeap(string fld, Size size, string label, ulong? value = null) // -> label
 		{
-			var label = "mem_" + StaticHeapUsed.Bytes.ToString("X2");
-			StaticHeapAllocation.Add(label, (StaticHeapUsed, value ?? 0));
-			StaticHeapUsed += size;
-			return label;
+			StaticFields.Add(fld, new StaticAllocation(StaticHeapOffset, size, label, value ?? 0));
+			StaticHeapOffset += size;
 		}
 
 		public string GenerateMethod(MethodDefinition method)
@@ -163,7 +163,7 @@ namespace MMIXCompiler
 					doesCall = true;
 			}
 
-			flowQueue.Enqueue((0, new Stack.StackElem[0]));
+			flowQueue.Enqueue((0, Array.Empty<Stack.StackElem>()));
 
 			var blockStrb = new StringBuilder();
 			while (flowQueue.Count > 0)
@@ -207,7 +207,7 @@ namespace MMIXCompiler
 
 		public void GenerateInstruction(StringBuilder strb, Stack stack, Instruction instruct, MethodDefinition method, HashSet<Instruction> hasInJump)
 		{
-			string reg1, reg2, reg3;
+			Reg reg1, reg2, reg3;
 			TypeReference typ1, typ2, typ3;
 			string lbl = "";
 			if (hasInJump.Contains(instruct))
@@ -225,14 +225,14 @@ namespace MMIXCompiler
 			switch (instruct.OpCode.Code)
 			{
 			case Code.Nop: strb.GenNop(lbl); break;
-			case Code.Break: Nop(instruct, strb); break;
+			case Code.Break: NotImplemented(instruct, strb); break;
 			case Code.Ldarg_0:
 			case Code.Ldarg_1:
 			case Code.Ldarg_2:
 			case Code.Ldarg_3:
 			case Code.Ldarg_S:
 			case Code.Ldarg:
-				int ldargIndex = code > Code.Ldarg_3 ? ((VariableReference)instruct.Operand).Index : ci - 2;
+				int ldargIndex = code > Code.Ldarg_3 ? ((ParameterReference)instruct.Operand).Index : ci - 2;
 				stack.Push(method.Parameters[ldargIndex].ParameterType);
 				PushStack(strb, lbl, stack, stack.Parameter, ldargIndex);
 				break;
@@ -257,10 +257,10 @@ namespace MMIXCompiler
 				stack.Pop();
 				break;
 			case Code.Ldarga_S:
-			case Code.Ldarga: Nop(instruct, strb); break;
+			case Code.Ldarga: NotImplemented(instruct, strb); break;
 			case Code.Starg_S:
 			case Code.Starg:
-				int stargIndex = ((VariableReference)instruct.Operand).Index;
+				int stargIndex = ((ParameterReference)instruct.Operand).Index;
 				PopStack(strb, lbl, stack, stack.Parameter, stargIndex);
 				stack.Pop();
 				break;
@@ -273,7 +273,7 @@ namespace MMIXCompiler
 				break;
 			case Code.Ldnull:
 				stack.Push(primPtr);
-				strb.GenOp(lbl, "SET", stack.Reg(), "0");
+				strb.Lbl(lbl).OpSET(stack.Reg(), 0);
 				break;
 			case Code.Ldc_I4_M1:
 			case Code.Ldc_I4_0:
@@ -291,41 +291,52 @@ namespace MMIXCompiler
 			case Code.Ldc_I4_S:
 			case Code.Ldc_I4:
 				stack.Push(primI32);
-				strb.GenOp(lbl, "SET", stack.Reg(), instruct.Operand.ToString());
+				strb.GenLoadConst(lbl, stack.Reg(), unchecked((ulong)Convert.ToInt64(instruct.Operand)));
 				break;
 			case Code.Ldc_I8:
 				stack.Push(primI64);
-				strb.GenOp(lbl, "SET", stack.Reg(), instruct.Operand.ToString()); // todo: only 16 bit, make static global when >2^16
+				strb.GenLoadConst(lbl, stack.Reg(), unchecked((ulong)Convert.ToInt64(instruct.Operand)));
 				break;
-			case Code.Ldc_R4: Nop(instruct, strb); break;
-			case Code.Ldc_R8: Nop(instruct, strb); break;
+			case Code.Ldc_R4: NotImplemented(instruct, strb); break;
+			case Code.Ldc_R8: NotImplemented(instruct, strb); break;
 			case Code.Dup:
-				var dupTypeSize = GetSize(stack.DynStack.Peek().type);
+				var dupType = stack.DynStack.Peek().Type;
+				var dupTypeSize = GetSize(dupType);
 				StackMove(strb, stack.RegNum(), stack.RegNum() + dupTypeSize.Octets, dupTypeSize.Octets);
+				stack.Push(dupType);
 				break;
 			case Code.Pop:
 				strb.GenNop(lbl);
 				stack.Pop();
 				break;
-			case Code.Jmp: Nop(instruct, strb); break;
+			case Code.Jmp: NotImplemented(instruct, strb); break;
 			case Code.Call:
-				var callMethod = (MethodReference)instruct.Operand;
-				int callParamSize = callMethod.Parameters.Sum(x => GetSize(x.ParameterType).Octets);
-				int callStart = stack.RegNum() - callParamSize;
-				StackMove(strb, callStart + 1, callStart + 2, callParamSize);
-				reg1 = (callStart + 1).Reg();
-				for (int i = 0; i < callMethod.Parameters.Count; i++)
-					stack.Pop();
-				strb.GenOp(lbl, "PUSHJ", reg1, callMethod.Name);
-				stack.Push(callMethod.ReturnType);
+				{
+					var callMethod = (MethodReference)instruct.Operand;
+					int callParamSize = callMethod.Parameters.Sum(x => GetSize(x.ParameterType).Octets);
+
+					int stackEnd = stack.DynEndOffset.Octets;
+					for (int i = 0; i < callMethod.Parameters.Count; i++)
+						stack.Pop();
+					int stackToCall = stack.DynEndOffset.Octets;
+					var mainReg = stackToCall.Reg(); // Main result register
+
+					StackMove(strb, stackToCall, stackToCall + 1, stackEnd - stackToCall);
+
+
+
+					strb.GenOp(lbl, "PUSHJ", mainReg, callMethod.Name);
+
+					stack.Push(callMethod.ReturnType);
+				}
 				break;
-			case Code.Calli: Nop(instruct, strb); break;
+			case Code.Calli: NotImplemented(instruct, strb); break;
 			case Code.Ret:
-				if (stack.Return.Count <= 0)
+				if (stack.Return.Count == 0)
 				{
 					if (method.Name == "Main")
 					{
-						strb.GenOp(lbl, "SET", 255.Reg(), "0");
+						strb.Lbl(lbl).OpSET(255.Reg(), 0);
 						strb.GenOp("", "TRAP", "0", "Halt", "0");
 					}
 					else
@@ -335,15 +346,10 @@ namespace MMIXCompiler
 				}
 				else
 				{
-					strb.GenNop(lbl);
-					// we have to copy the return registers this way (s = stackptr)
-					// addr: value <- from
-					//    0:     1 <- s-3
-					//    1:     2 <- s-2
-					//    2:     3 <- s-1
-					//    3:     0 <- s-0
+					// PUSH/POP is weird http://mmix.cs.hm.edu/doc/instructions/pushjandpopexample.html
 
-					// move // 3: 0 <- s-0
+					strb.GenNop(lbl);
+
 					StackMove(strb, stack.DynEndOffset.Octets - 1, stack.Return.BlockOffset + stack.Return.BlockSize - 1, 1);
 					StackMove(strb, stack.DynEndOffset.Octets - stack.Return.BlockSize - 1, stack.Return.BlockOffset, stack.Return.BlockSize - 1);
 					strb.GenOp("", "POP", stack.Return.ElementSize[0].ToString(), "0");
@@ -426,7 +432,7 @@ namespace MMIXCompiler
 				strb.GenOp(lbl, "BNZ", stack.Reg(), Label(method, (Instruction)instruct.Operand));
 				stack.Pop();
 				break;
-			case Code.Switch: Nop(instruct, strb); break;
+			case Code.Switch: NotImplemented(instruct, strb); break;
 			case Code.Ldind_I1:
 			case Code.Ldind_U1:
 			case Code.Ldind_I2:
@@ -439,8 +445,8 @@ namespace MMIXCompiler
 				strb.GenOp(lbl, "LD" + GetFamiliar(code), stack.Reg(), reg1);
 				break;
 			case Code.Ldind_I: goto case Code.Ldind_I8;
-			case Code.Ldind_R4: Nop(instruct, strb); break;
-			case Code.Ldind_R8: Nop(instruct, strb); break;
+			case Code.Ldind_R4: NotImplemented(instruct, strb); break;
+			case Code.Ldind_R8: NotImplemented(instruct, strb); break;
 			case Code.Ldind_Ref: goto case Code.Ldind_I;
 			case Code.Stind_I1:
 			case Code.Stind_I2:
@@ -451,8 +457,8 @@ namespace MMIXCompiler
 				strb.GenOp(lbl, "ST" + GetFamiliar(code), reg1, reg2);
 				break;
 			case Code.Stind_I: goto case Code.Stind_I8;
-			case Code.Stind_R4: Nop(instruct, strb); break;
-			case Code.Stind_R8: Nop(instruct, strb); break;
+			case Code.Stind_R4: NotImplemented(instruct, strb); break;
+			case Code.Stind_R8: NotImplemented(instruct, strb); break;
 			case Code.Stind_Ref: goto case Code.Stind_I;
 			case Code.Add:
 				strb.GenOp(lbl, "ADD", stack.Reg(1), stack.Reg(1), stack.Reg());
@@ -558,110 +564,114 @@ namespace MMIXCompiler
 				break;
 			case Code.Conv_I: goto case Code.Conv_I8;
 			case Code.Conv_U: goto case Code.Conv_U8;
-			case Code.Conv_R4: Nop(instruct, strb); break;
-			case Code.Conv_R8: Nop(instruct, strb); break;
-			case Code.Callvirt: Nop(instruct, strb); break;
-			case Code.Cpobj: Nop(instruct, strb); break;
-			case Code.Ldobj: Nop(instruct, strb); break;
-			case Code.Ldstr: Nop(instruct, strb); break;
-			case Code.Newobj: Nop(instruct, strb); break;
-			case Code.Castclass: Nop(instruct, strb); break;
-			case Code.Isinst: Nop(instruct, strb); break;
-			case Code.Conv_R_Un: Nop(instruct, strb); break;
-			case Code.Unbox: Nop(instruct, strb); break;
-			case Code.Throw: Nop(instruct, strb); break;
+			case Code.Conv_R4: NotImplemented(instruct, strb); break;
+			case Code.Conv_R8: NotImplemented(instruct, strb); break;
+			case Code.Callvirt: NotImplemented(instruct, strb); break;
+			case Code.Cpobj: NotImplemented(instruct, strb); break;
+			case Code.Ldobj: NotImplemented(instruct, strb); break;
+			case Code.Ldstr: NotImplemented(instruct, strb); break;
+			case Code.Newobj: NotImplemented(instruct, strb); break;
+			case Code.Castclass: NotImplemented(instruct, strb); break;
+			case Code.Isinst: NotImplemented(instruct, strb); break;
+			case Code.Conv_R_Un: NotImplemented(instruct, strb); break;
+			case Code.Unbox: NotImplemented(instruct, strb); break;
+			case Code.Throw: NotImplemented(instruct, strb); break;
 			case Code.Ldfld:
-				{
-					var fld = instruct.Operand as FieldDefinition;
-					reg1 = stack.PopReg();
-					stack.Push(fld.FieldType);
-					stack.Push(primU64);
-					reg3 = stack.Reg(); // get temporary register with address
-					var declType = fld.DeclaringType;
-					if (declType.IsPointer || declType.IsClass)
-					{
-						var octs = GetSize(fld.FieldType).Octets;
-						// backup our address from the stack
-						if (octs > 1)
-						{
-							strb.GenOp(lbl, "SET", reg3, reg1);
-							reg1 = reg3;
-						}
-						for (int i = 0; i < octs; i++)
-						{
-							strb.GenOp(lbl, "LDOU", stack.Reg(1, i), reg1, ((GetFldOffset(fld).Octets + i) * AddrSize).ToString());
-						}
-					}
-					else
-					{
-						Nop(instruct, strb);
-					}
-					stack.Pop(); // pop tmp
-				}
-				break;
-			case Code.Ldflda: Nop(instruct, strb); break;
-			case Code.Stfld:
-			case Code.Stsfld:
-				/* Store field
-				 * (-1) value [x:size]
-				 * ( 0) object
-				 */
-				{
-					var fld = instruct.Operand as FieldDefinition;
-
-					if (code == Code.Stsfld)
-					{
-						stack.Push(primU64);
-						strb.GenOp(lbl, "SET", stack.Reg(), StaticHeapAllocation[fld.FullName].Bytes.ToString());
-					}
-
-					reg1 = stack.Reg();
-
-					if (fld.DeclaringType.IsPointer || fld.DeclaringType.IsClass)
-					{
-						for (int i = 0; i < GetSize(fld.FieldType).Octets; i++)
-						{
-							strb.GenOp(lbl, "STOU", reg1, stack.Reg(1, i), ((GetFldOffset(fld).Octets + i) * AddrSize).ToString());
-						}
-					}
-					else
-					{
-						Nop(instruct, strb);
-					}
-					// hack to pop the obj ref, then get the type back onto the stack
-					stack.Pop();
-					stack.Pop();
-				}
-				break;
 			case Code.Ldsfld:
 				{
 					var fld = instruct.Operand as FieldDefinition;
+					int fieldOffset;
+					Reg sourceAddressReg;
+
+					if (code == Code.Ldsfld)
+					{
+						stack.Push(primU64);
+						sourceAddressReg = stack.Reg();
+						stack.Pop();
+						var staticAddr = GetStaticFieldAddress(fld);
+						strb.GenLoadConst(lbl, sourceAddressReg, staticAddr.Bytes);
+						fieldOffset = 0;
+					}
+					else
+					{
+						sourceAddressReg = stack.PopReg();
+						fieldOffset = GetFldOffset(fld).Octets;
+					}
+
 					stack.Push(fld.FieldType);
-					stack.Push(primU64);
-					reg1 = stack.Reg(); // get temporary register with address
+
 					var declType = fld.DeclaringType;
 					if (declType.IsPointer || declType.IsClass)
 					{
 						var octs = GetSize(fld.FieldType).Octets;
-						// backup our address from the stack
-						strb.GenOp(lbl, "SET", reg1, StaticHeapAllocation[(instruct.Operand as FieldReference).FullName].Bytes.ToString());
-						for (int i = 0; i < octs; i++)
+						for (int i = octs - 1; i >= 0; i--)
 						{
-							strb.GenOp(lbl, "LDOU", stack.Reg(1, i), reg1, ((GetFldOffset(fld).Octets + i) * AddrSize).ToString());
+							strb.GenOp(lbl, "LDOU", stack.Reg(0, i), sourceAddressReg, ((fieldOffset + i) * AddrSize).ToString());
 						}
 					}
 					else
 					{
-						Nop(instruct, strb);
+						NotImplemented(instruct, strb);
 					}
-					stack.Pop(); // pop tmp
+				}
+				break;
+			case Code.Ldflda: NotImplemented(instruct, strb); break;
+			case Code.Stfld:
+			case Code.Stsfld:
+				/* ref: Store field
+				 * (-1) object
+				 * ( 0) value [x:size]
+				 * 
+				 * stat: Store field
+				 * ( 0) value [x:size]
+				 * ( 1) tmp: static address
+				 */
+				{
+					var fld = instruct.Operand as FieldDefinition;
+					int regNum;
+					int fieldOffset;
+					Reg targetAddressReg;
+
+					if (code == Code.Stsfld)
+					{
+						var staticAddr = GetStaticFieldAddress(fld);
+						stack.Push(primU64);
+						targetAddressReg = stack.Reg(0);
+						regNum = 1;
+						strb.GenLoadConst(lbl, targetAddressReg, staticAddr.Bytes);
+						fieldOffset = 0;
+					}
+					else
+					{
+						targetAddressReg = stack.Reg(1);
+						regNum = 0;
+						fieldOffset = GetFldOffset(fld).Octets;
+					}
+
+					var declType = fld.DeclaringType;
+					if (declType.IsPointer || declType.IsClass)
+					{
+						for (int i = 0; i < GetSize(fld.FieldType).Octets; i++)
+						{
+							strb.GenOp(lbl, "STOU", stack.Reg(regNum, i), targetAddressReg, ((fieldOffset + i) * AddrSize).ToString());
+						}
+					}
+					else
+					{
+						NotImplemented(instruct, strb);
+					}
+					stack.Pop(); stack.Pop();
 				}
 				break;
 			case Code.Ldsflda:
-				stack.Push(primU64);
-				strb.GenOp(lbl, "SET", stack.Reg(), StaticHeapAllocation[(instruct.Operand as FieldReference).FullName].Bytes.ToString());
+				{
+					var fld = instruct.Operand as FieldDefinition;
+					var staticAddr = GetStaticFieldAddress(fld);
+					stack.Push(primU64);
+					strb.GenLoadConst(lbl, stack.Reg(), staticAddr.Bytes);
+				}
 				break;
-			case Code.Stobj: Nop(instruct, strb); break;
+			case Code.Stobj: NotImplemented(instruct, strb); break;
 			case Code.Conv_Ovf_I1_Un: /* TODO TRIP */ goto case Code.Conv_I1;
 			case Code.Conv_Ovf_I2_Un: /* TODO TRIP */ goto case Code.Conv_I2;
 			case Code.Conv_Ovf_I4_Un: /* TODO TRIP */ goto case Code.Conv_I4;
@@ -672,22 +682,28 @@ namespace MMIXCompiler
 			case Code.Conv_Ovf_U8_Un: /* TODO TRIP */ goto case Code.Conv_U8;
 			case Code.Conv_Ovf_I_Un:  /* TODO TRIP */ goto case Code.Conv_I;
 			case Code.Conv_Ovf_U_Un:  /* TODO TRIP */ goto case Code.Conv_U;
-			case Code.Box: Nop(instruct, strb); break;
+			case Code.Box: NotImplemented(instruct, strb); break;
 			/* Array read access
 			* (0) length
 			* ->
 			* (0) array [ 0:ptr 1:len ]
 			*/
 			case Code.Newarr:
-				reg1 = stack.Reg();
-				stack.Push(primU64);
-				strb.GenOp("", "SET", stack.Reg(), reg1);
-				stack.Push(primU64);
-				strb.GenOp(lbl, "MUL", stack.Reg(0), stack.Reg(1), GetSize(instruct.Operand as TypeReference).Bytes.ToString());
-				strb.GenOp("", "PUSHJ", stack.Reg(1), "malloc");
-				strb.GenOp("", "SET", reg1, stack.Reg());
-				stack.Pop(); stack.Pop(); stack.Pop();
-				stack.Push(primArr);
+				{
+					reg1 = stack.Reg(); // backupAllocCount
+					stack.Push(primU64);
+					reg2 = stack.Reg(); // allocCount
+					stack.Push(primU64);
+					reg3 = stack.Reg(); // allocBytes
+					stack.Pop(); stack.Pop(); stack.Pop();
+
+					strb.GenOp(lbl, "MUL", reg3, reg1, GetSize(instruct.Operand as TypeReference).Bytes.ToString());
+					strb.GenOp("", "PUSHJ", reg2, "malloc");
+					strb.GenOp("", "SET", reg3, reg1);
+					strb.GenOp("", "SET", reg1, reg2);
+					strb.GenOp("", "SET", reg2, reg3);
+					stack.Push(primArr);
+				}
 				break;
 			case Code.Ldlen:
 				reg1 = stack.PopReg();
@@ -720,9 +736,9 @@ namespace MMIXCompiler
 				strb.GenOp(lbl, "LD" + GetFamiliar(code), stack.Reg(), reg2, reg1);
 				break;
 			case Code.Ldelem_I: goto case Code.Ldelem_I8;
-			case Code.Ldelem_R4: Nop(instruct, strb); break;
-			case Code.Ldelem_R8: Nop(instruct, strb); break;
-			case Code.Ldelem_Ref: Nop(instruct, strb); break;
+			case Code.Ldelem_R4: NotImplemented(instruct, strb); break;
+			case Code.Ldelem_R8: NotImplemented(instruct, strb); break;
+			case Code.Ldelem_Ref: NotImplemented(instruct, strb); break;
 			/* Array write access
 			 * (-3) array [ 0:ptr 1:len ]
 			 * (-1) index
@@ -738,12 +754,12 @@ namespace MMIXCompiler
 				reg3 = stack.PopReg(); // array [ 0:ptr 1:len ]
 				strb.GenOp(lbl, "ST" + GetFamiliar(code), reg1, reg3, reg2);
 				break;
-			case Code.Stelem_R4: Nop(instruct, strb); break;
-			case Code.Stelem_R8: Nop(instruct, strb); break;
-			case Code.Stelem_Ref: Nop(instruct, strb); break;
-			case Code.Ldelem_Any: Nop(instruct, strb); break;
-			case Code.Stelem_Any: Nop(instruct, strb); break;
-			case Code.Unbox_Any: Nop(instruct, strb); break;
+			case Code.Stelem_R4: NotImplemented(instruct, strb); break;
+			case Code.Stelem_R8: NotImplemented(instruct, strb); break;
+			case Code.Stelem_Ref: NotImplemented(instruct, strb); break;
+			case Code.Ldelem_Any: NotImplemented(instruct, strb); break;
+			case Code.Stelem_Any: NotImplemented(instruct, strb); break;
+			case Code.Unbox_Any: NotImplemented(instruct, strb); break;
 			case Code.Conv_Ovf_I1: /* TODO TRIP */ goto case Code.Conv_I1;
 			case Code.Conv_Ovf_U1: /* TODO TRIP */ goto case Code.Conv_I2;
 			case Code.Conv_Ovf_I2: /* TODO TRIP */ goto case Code.Conv_I4;
@@ -754,20 +770,20 @@ namespace MMIXCompiler
 			case Code.Conv_Ovf_U8: /* TODO TRIP */ goto case Code.Conv_U8;
 			case Code.Conv_Ovf_I: /* TODO TRIP */ goto case Code.Conv_I;
 			case Code.Conv_Ovf_U: /* TODO TRIP */ goto case Code.Conv_U;
-			case Code.Refanyval: Nop(instruct, strb); break;
-			case Code.Ckfinite: Nop(instruct, strb); break;
-			case Code.Mkrefany: Nop(instruct, strb); break;
-			case Code.Ldtoken: Nop(instruct, strb); break;
-			case Code.Add_Ovf: Nop(instruct, strb); break;
-			case Code.Add_Ovf_Un: Nop(instruct, strb); break;
-			case Code.Mul_Ovf: Nop(instruct, strb); break;
-			case Code.Mul_Ovf_Un: Nop(instruct, strb); break;
-			case Code.Sub_Ovf: Nop(instruct, strb); break;
-			case Code.Sub_Ovf_Un: Nop(instruct, strb); break;
-			case Code.Endfinally: Nop(instruct, strb); break;
-			case Code.Leave: Nop(instruct, strb); break;
-			case Code.Leave_S: Nop(instruct, strb); break;
-			case Code.Arglist: Nop(instruct, strb); break;
+			case Code.Refanyval: NotImplemented(instruct, strb); break;
+			case Code.Ckfinite: NotImplemented(instruct, strb); break;
+			case Code.Mkrefany: NotImplemented(instruct, strb); break;
+			case Code.Ldtoken: NotImplemented(instruct, strb); break;
+			case Code.Add_Ovf: NotImplemented(instruct, strb); break;
+			case Code.Add_Ovf_Un: NotImplemented(instruct, strb); break;
+			case Code.Mul_Ovf: NotImplemented(instruct, strb); break;
+			case Code.Mul_Ovf_Un: NotImplemented(instruct, strb); break;
+			case Code.Sub_Ovf: NotImplemented(instruct, strb); break;
+			case Code.Sub_Ovf_Un: NotImplemented(instruct, strb); break;
+			case Code.Endfinally: NotImplemented(instruct, strb); break;
+			case Code.Leave: NotImplemented(instruct, strb); break;
+			case Code.Leave_S: NotImplemented(instruct, strb); break;
+			case Code.Arglist: NotImplemented(instruct, strb); break;
 			case Code.Ceq:
 				// TODO convert to popreg
 				strb.GenOp(lbl, "CMP", stack.Reg(1), stack.Reg(1), stack.Reg());
@@ -799,27 +815,34 @@ namespace MMIXCompiler
 				stack.Pop(); stack.Pop();
 				stack.Push(primBool);
 				break;
-			case Code.Ldftn: Nop(instruct, strb); break;
-			case Code.Ldvirtftn: Nop(instruct, strb); break;
-			case Code.Localloc: Nop(instruct, strb); break;
-			case Code.Endfilter: Nop(instruct, strb); break;
-			case Code.Unaligned: Nop(instruct, strb); break;
-			case Code.Volatile: Nop(instruct, strb); break;
-			case Code.Tail: Nop(instruct, strb); break;
-			case Code.Initobj: Nop(instruct, strb); break;
-			case Code.Constrained: Nop(instruct, strb); break;
-			case Code.Cpblk: Nop(instruct, strb); break;
-			case Code.Initblk: Nop(instruct, strb); break;
-			case Code.No: Nop(instruct, strb); break;
-			case Code.Rethrow: Nop(instruct, strb); break;
+			case Code.Ldftn: NotImplemented(instruct, strb); break;
+			case Code.Ldvirtftn: NotImplemented(instruct, strb); break;
+			case Code.Localloc: NotImplemented(instruct, strb); break;
+			case Code.Endfilter: NotImplemented(instruct, strb); break;
+			case Code.Unaligned: NotImplemented(instruct, strb); break;
+			case Code.Volatile: NotImplemented(instruct, strb); break;
+			case Code.Tail: NotImplemented(instruct, strb); break;
+			case Code.Initobj:
+				typ1 = instruct.Operand as TypeReference;
+				reg1 = stack.PopReg();
+				var initSize = GetSize(typ1).Octets;
+				for (int i = 0; i < initSize; i++)
+					strb.GenOp(lbl, "STCO", "0", reg1, (i * AddrSize).ToString());
+				break;
+			case Code.Constrained: NotImplemented(instruct, strb); break;
+			case Code.Cpblk: NotImplemented(instruct, strb); break;
+			case Code.Initblk: NotImplemented(instruct, strb); break;
+			case Code.No: NotImplemented(instruct, strb); break;
+			case Code.Rethrow: NotImplemented(instruct, strb); break;
 			case Code.Sizeof:
 				var _sizeof = GetSize(instruct.Operand as TypeReference);
 				stack.Push(primU64);
+
 				strb.GenOp(lbl, "SET", stack.Reg(), _sizeof.Bytes8.ToString());
 				break;
-			case Code.Refanytype: Nop(instruct, strb); break;
-			case Code.Readonly: Nop(instruct, strb); break;
-			default: Nop(instruct, strb); break;
+			case Code.Refanytype: NotImplemented(instruct, strb); break;
+			case Code.Readonly: NotImplemented(instruct, strb); break;
+			default: NotImplemented(instruct, strb); break;
 			}
 		}
 
@@ -866,7 +889,7 @@ namespace MMIXCompiler
 			}
 		}
 
-		private Stack CalcStack(MethodDefinition method)
+		private static Stack CalcStack(MethodDefinition method)
 		{
 			var stack = new Stack
 			{
@@ -877,7 +900,7 @@ namespace MMIXCompiler
 
 			//stack.Return.Count = Math.Sign(GetSize(method.ReturnType)); // TODO
 			stack.Return.IndexStart = 0;
-			stack.Return.ElementSize = GetSize(method.ReturnType) == Size.Zero ? new int[0] : new[] { method.ReturnType }.Select(x => GetSize(x).Octets).ToArray();
+			stack.Return.ElementSize = GetSize(method.ReturnType) == Size.Zero ? Array.Empty<int>() : new[] { method.ReturnType }.Select(x => GetSize(x).Octets).ToArray();
 			stack.Return.ElementOffset = new int[stack.Return.Count];
 
 			//stack.Parameter.Count = method.Parameters.Count;
@@ -893,31 +916,34 @@ namespace MMIXCompiler
 			//stack.End.Count = 0;
 			stack.FixedEndIndex = stack.Locals.IndexStart + stack.Locals.Count;
 
-			stack.CumulativeOffset = new int[stack.FixedEndIndex];
-			stack.AbsElementSize = new int[stack.FixedEndIndex];
+			stack.FixedStack = new Stack.StackElem[stack.FixedEndIndex];
 
 			int gOff = 0;
 			int cum = 0;
-			AccumulateStack(ref gOff, ref cum, stack, stack.Return);
-			AccumulateStack(ref gOff, ref cum, stack, stack.Parameter);
-			AccumulateStack(ref gOff, ref cum, stack, stack.Locals);
+			AccumulateStack(ref gOff, ref cum, stack, stack.Return, "RET");
+			AccumulateStack(ref gOff, ref cum, stack, stack.Parameter, "ARG");
+			AccumulateStack(ref gOff, ref cum, stack, stack.Locals, "LOC");
 
 			stack.FixedEndOffset = cum;
 
 			return stack;
 		}
 
-		private static void AccumulateStack(ref int gOff, ref int cum, Stack stack, StackBlock block)
+		private static void AccumulateStack(ref int gOff, ref int cum, Stack stack, StackBlock block, string desc)
 		{
 			block.BlockOffset = gOff;
 			int localSize = 0;
 			for (int i = 0; i < block.ElementOffset.Length; i++)
 			{
+				stack.FixedStack[gOff] = new()
+				{
+					Desc = desc,
+					Size = Size.FromOctets(block.ElementSize[i]),
+					Offset = Size.FromOctets(cum)
+				};
 				block.ElementOffset[i] = cum;
-				stack.CumulativeOffset[gOff] = cum;
 				cum += block.ElementSize[i];
 				localSize += block.ElementSize[i];
-				stack.AbsElementSize[gOff] = block.ElementSize[i];
 				gOff++;
 			}
 			block.BlockSize = localSize;
@@ -927,17 +953,17 @@ namespace MMIXCompiler
 		{
 			if (type.FullName == "System.Void")
 				return Size.Zero;
-			if (type.IsArray)
-				return Size.FromBytes(16); // 2x long
+			if (type.FullName == "System.Array" || type.IsArray)
+				return Size.FromBytes(AddrSize * 2); // 2x long
 			if (type.IsPointer)
-				return Size.FromBytes(8);
+				return Size.FromBytes(AddrSize);
 			if (type.IsPinned)
 			{
 				var ptype = (PinnedType)type;
 				return GetSize(ptype.ElementType);
 			}
 			if (type.IsByReference)
-				return Size.FromBytes(8);
+				return Size.FromBytes(AddrSize);
 			if (type.FullName == "System.Boolean")
 				return Size.FromBytes(1);
 			if (type.FullName == "System.Byte")
@@ -958,6 +984,9 @@ namespace MMIXCompiler
 				return Size.FromBytes(8);
 			if (!type.IsPrimitive && type.IsDefinition)
 			{
+				if (!type.IsValueType)
+					return Size.FromBytes(AddrSize);
+
 				if (!TypeSizes.TryGetValue(type.FullName, out var size))
 				{
 					var dtype = (TypeDefinition)type;
@@ -966,7 +995,8 @@ namespace MMIXCompiler
 				}
 				return size;
 			}
-			return Size.FromOctets(1);
+			throw new Exception("Unknown size");
+			//return Size.FromOctets(1);
 		}
 
 		public static Size GetClassSize(TypeDefinition type)
@@ -986,6 +1016,7 @@ namespace MMIXCompiler
 				var offset = Size.Zero;
 				foreach (var tfld in fld.DeclaringType.Fields)
 				{
+					if (tfld.IsStatic) continue;
 					FieldOffsets.Add(tfld.FullName, offset);
 					offset += GetSize(tfld.FieldType);
 				}
@@ -994,7 +1025,7 @@ namespace MMIXCompiler
 			return size;
 		}
 
-		private void Nop(Instruction instruction, StringBuilder strb)
+		private static void NotImplemented(Instruction instruction, StringBuilder strb)
 		{
 			strb.Append("% Unknown: ").AppendLine(instruction.OpCode.Name);
 			throw new NotImplementedException();
@@ -1043,10 +1074,15 @@ namespace MMIXCompiler
 			{
 			case "cread":
 				strb.GenNop("cread"); // 0: arrptr, 1: buflen
-									  //strb.GenOp("", "STO", 0.Reg(), 255.Reg(), "0");
-									  //strb.GenOp("", "STO", 1.Reg(), 255.Reg(), "8");
-				strb.GenOp("", "SET", 255.Reg(), "rS");
+				strb.GenOp("", "GET", 2.Reg(), "rJ");
+				strb.GenOp("", "SET", 4.Reg(), GetSize(primArr).Bytes8.ToString());
+				strb.GenOp("", "PUSHJ", 3.Reg(), "malloc");
+				strb.GenOp("", "PUT", "rJ", 2.Reg());
+				strb.GenOp("", "STOU", 0.Reg(), 3.Reg(), "0");
+				strb.GenOp("", "STOU", 1.Reg(), 3.Reg(), "8");
+				strb.GenOp("", "SET", 255.Reg(), 3.Reg());
 				strb.GenOp("", "TRAP", "0", "Fgets", "StdIn");
+				// TODO free
 				strb.GenOp("", "POP", "1", "0");
 				break;
 
@@ -1092,37 +1128,44 @@ namespace MMIXCompiler
 	//	0: ptr
 	//	1: len
 
-	internal readonly struct Size
+	internal readonly struct Size : IEquatable<Size>
 	{
 		public ulong Bytes { get; }
-		public int Octets => (int)((Bytes + 7) / 8);
-		public int Bytes8 => Octets * 8;
+		public ulong OctetsLong => (Bytes + 7) / 8;
+		public ulong Bytes8Long => OctetsLong * 8;
+		public int Octets => (int)OctetsLong;
+		public int Bytes8 => (int)Bytes8Long;
 
-		public static readonly Size Zero = new Size(0);
-		public static readonly Size Oct = new Size(8);
+		public static readonly Size Zero = new(0);
+		public static readonly Size Oct = new(8);
 
 		private Size(ulong bytes)
 		{
 			Bytes = bytes;
 		}
 
-		public static Size FromBytes(ulong bytes) => new Size(bytes);
-		public static Size FromOctets(int octs) => new Size((ulong)(octs * 8));
+		public static Size FromBytes(ulong bytes) => new(bytes);
+		public static Size FromOctets(ulong octs) => new(octs * 8);
+		public static Size FromOctets(int octs) => FromOctets((ulong)octs);
 
-		public static Size operator +(Size a, Size b) => FromOctets(a.Octets + b.Octets);
+		public static Size operator +(Size a, Size b) => FromOctets(a.OctetsLong + b.OctetsLong);
 		public static bool operator ==(Size a, Size b) => a.Bytes == b.Bytes;
 		public static bool operator !=(Size a, Size b) => a.Bytes != b.Bytes;
 
-		public override string ToString() => $"{Octets} ({Bytes})";
+		public override string ToString() => $"{OctetsLong} ({Bytes})";
+
+		public override bool Equals(object other) => other is Size size && Equals(size);
+		public bool Equals(Size other) => Bytes == other.Bytes;
+		public override int GetHashCode() => HashCode.Combine(Bytes);
 	}
 
 	internal class Stack
 	{
 		public int Index => DynStack.Count + FixedEndIndex - 1;
 
-		public int[] AbsElementSize { get; set; }
-		public int[] CumulativeOffset { get; set; }
-		public Stack<StackElem> DynStack = new Stack<StackElem>();
+		public StackElem[] FixedStack { get; set; } // only for debug
+		public Stack<StackElem> DynStack { get; set; } = new();
+		public IEnumerable<StackElem> FullDebugStackView => FixedStack.Concat(DynStack.Reverse());
 
 		public StackBlock Return { get; set; }
 		public StackBlock Parameter { get; set; }
@@ -1131,7 +1174,7 @@ namespace MMIXCompiler
 		public int FixedEndIndex { get; set; }
 		public int FixedEndOffset { get; set; }
 
-		public Size DynEndOffset => DynStack.Count > 0 ? (DynStack.Peek().offset + Compiler.GetSize(DynStack.Peek().type)) : Size.FromOctets(FixedEndOffset);
+		public Size DynEndOffset => DynStack.Count > 0 ? (DynStack.Peek().Offset + Compiler.GetSize(DynStack.Peek().Type)) : Size.FromOctets(FixedEndOffset);
 
 		public void Push(TypeReference type)
 		{
@@ -1140,38 +1183,42 @@ namespace MMIXCompiler
 				return;
 
 			var currentOff = DynEndOffset;
-			DynStack.Push(new StackElem { offset = currentOff, type = type });
+			DynStack.Push(new StackElem { Offset = currentOff, Type = type, Size = size });
 		}
 
 		public TypeReference Pop() => PopRegTyp().typ;
 
-		public string PopReg() => PopRegTyp().reg;
+		public Reg PopReg() => PopRegTyp().reg;
 
-		public (string reg, TypeReference typ) PopRegTyp()
+		public (Reg reg, TypeReference typ) PopRegTyp()
 		{
 			if (DynStack.Count <= 0)
 				throw new InvalidOperationException("Stack empty!");
 
 			var reg = Reg(0);
 			var elem = DynStack.Pop();
-			return (reg, elem.type);
+			return (reg, elem.Type);
 		}
 
-		public int RegNum(int sub = 0, int elem = 0)
+		public byte RegNum(int sub = 0, int elem = 0)
 		{
 			int acc = Index - sub;
 			if (acc < FixedEndIndex)
 				throw new InvalidOperationException("Stack accessing fixed registers");
 			else
-				return DynStack.Reverse().ElementAt(acc - FixedEndIndex).offset.Octets + elem;
+				return checked((byte)(DynStack.Reverse().ElementAt(acc - FixedEndIndex).Offset.Octets + elem));
 		}
 
-		public string Reg(int sub = 0, int elem = 0) => $"${RegNum(sub, elem)}";
+		public Reg Reg(int sub = 0, int elem = 0) => new(RegNum(sub, elem));
 
-		public struct StackElem
+		public class StackElem
 		{
-			public Size offset;
-			public TypeReference type;
+			public Size Size { get; set; }
+			public Size Offset { get; set; }
+			public TypeReference? Type { get; set; }
+			public string? Desc { get; set; }
+
+			public override string ToString() => $"@{Offset.OctetsLong}:{Size.OctetsLong} {Desc} ({Type?.FullName})";
 		}
 
 		public StackElem[] Save() => DynStack.ToArray();
@@ -1190,27 +1237,32 @@ namespace MMIXCompiler
 		public int[] ElementOffset { get; set; }
 		public int[] ElementSize { get; set; }
 
-		public int RegNum(int index = 0, int elem = 0)
+		public byte RegNum(int index = 0, int elem = 0)
 		{
 			if (index >= Count)
 				throw new InvalidOperationException("Access out of block");
 			else
-				return ElementOffset[index] + elem;
+				return checked((byte)(ElementOffset[index] + elem));
 		}
-		public string Reg(int index = 0, int elem = 0) => $"${RegNum(index, elem)}";
+		public Reg Reg(int index = 0, int elem = 0) => new(RegNum(index, elem));
 	}
 
 	internal static class Ext
 	{
 		public static void GenOp(this StringBuilder strb, string label, string op, string pX = null, string pY = null, string pZ = null)
 		{
-			strb.Append(label).Append(" ").Append(op);
+			strb.Lbl(label).GenOpClear(op, pX, pY, pZ);
+		}
+
+		public static void GenOpClear(this StringBuilder strb, string op, string pX = null, string pY = null, string pZ = null)
+		{
+			strb.Append(' ').Append(op);
 			if (pX != null)
-				strb.Append(" ").Append(pX);
+				strb.Append(' ').Append(pX);
 			if (pY != null)
-				strb.Append(",").Append(pY);
+				strb.Append(',').Append(pY);
 			if (pZ != null)
-				strb.Append(",").Append(pZ);
+				strb.Append(',').Append(pZ);
 			strb.AppendLine();
 		}
 
@@ -1218,14 +1270,14 @@ namespace MMIXCompiler
 		{
 			if (!string.IsNullOrEmpty(label))
 			{
-				strb.Append(label).Append(" ").Append("SWYM");
+				strb.Append(label).Append(' ').Append("SWYM");
 				strb.AppendLine();
 			}
 		}
 
 		public static void GenNopCom(this StringBuilder strb, string label, string text = null)
 		{
-			strb.Append(label).Append(" ").Append("SWYM");
+			strb.Append(label).Append(' ').Append("SWYM");
 			if (text != null)
 				strb.Append(" % ").Append(text);
 			strb.AppendLine();
@@ -1236,7 +1288,51 @@ namespace MMIXCompiler
 			strb.Append(" % ").AppendLine(text);
 		}
 
-		public static string Reg(this int num) => $"${num}";
+		public static void GenLoadConst(this StringBuilder strb, string label, Reg reg, ulong num)
+		{
+			if (unchecked((long)num) is < 0 and >= -0xFFFF)
+			{
+				strb.GenOp(label, "SETL", reg, (-(long)num).ToString());
+				strb.GenOp(label, "NEG", reg, reg);
+				return;
+			}
+
+			bool firstSet = false;
+			ulong numH = (num >> 48) & 0xFFFF;
+			ulong numMH = (num >> 32) & 0xFFFF;
+			ulong numML = (num >> 16) & 0xFFFF;
+			ulong numL = (num >> 00) & 0xFFFF;
+			if (numL != 0)
+			{
+				strb.GenOp(label, "SETL", reg, numL.ToString());
+				firstSet = true;
+			}
+			if (numML != 0)
+			{
+				strb.GenOp(label, firstSet ? "ORML" : "SETML", reg, numML.ToString());
+				firstSet = true;
+			}
+			if (numMH != 0)
+			{
+				strb.GenOp(label, firstSet ? "ORMH" : "SETMH", reg, numMH.ToString());
+				firstSet = true;
+			}
+			if (numH != 0)
+			{
+				strb.GenOp(label, firstSet ? "ORH" : "SETH", reg, numH.ToString());
+				firstSet = true;
+			}
+
+			if (!firstSet)
+			{
+				strb.GenOp(label, "SET", reg, "0");
+			}
+		}
+
+		public static StringBuilder Lbl(this StringBuilder strb, string label) => strb.Append(label);
+
+		public static Reg Reg(this int num) { if (num > 255) throw new ArgumentOutOfRangeException(nameof(num)); return ((byte)num).Reg(); }
+		public static Reg Reg(this byte num) => new(num);
 
 		public static Size Size(this TypeReference tref) => Compiler.GetSize(tref);
 
@@ -1267,5 +1363,34 @@ namespace MMIXCompiler
 			|| code == Code.Bne_Un_S;
 		public static bool IsUnCondJump(this Code code) => code == Code.Br || code == Code.Br_S;
 		public static bool IsJump(this Code code) => code.IsCondJump() || code.IsUnCondJump();
+
+		public static void OpSET(this StringBuilder strb, Reg x, ushort yz) => strb.GenOpClear("SET", x, yz.ToString());
+		public static void OpSET(this StringBuilder strb, Reg x, Reg y) => strb.GenOpClear("SET", x, y);
+
+		/// <summary>SETL: u($X) ← YZ</summary>
+		public static void OpSETL(this StringBuilder strb, Reg x, ushort yz) => strb.GenOpClear("SETL", x, yz.ToString());
+		/// <summary>SETL: $X ← $Y | $Z</summary>
+		public static void OpOR(this StringBuilder strb, Reg x, Reg y, Reg z) => strb.GenOpClear("OR", x, y, z);
 	}
+
+	class Reg
+	{
+		public byte Number { get; }
+
+		public Reg(byte number)
+		{
+			Number = number;
+		}
+
+		public override string ToString() => $"${Number}";
+
+		public static implicit operator string(Reg reg) => reg.ToString();
+	}
+
+	record StaticAllocation(
+		Size address,
+		Size size,
+		string label,
+		ulong value
+	);
 }
