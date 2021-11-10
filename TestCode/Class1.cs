@@ -1,5 +1,7 @@
+
 namespace TestCode
 {
+	using static MMIXSTD;
 	public static unsafe class MMIX
 	{
 		public static void Main(int argc, byte** argv)
@@ -17,24 +19,89 @@ namespace TestCode
 				}
 			}*/
 
-			Dummy(42);
+			byte[] readbuf = new byte[13]; // MMIXSTD.newarr<byte>(32, sizeof(byte));
+			cread(readbuf);
+			var strlen = Strlen(readbuf);
+			cwrite(readbuf);
+			delarr(readbuf);
 
-			byte[] buf = new byte[13];// MMIXSTD.newarr<byte>(32, sizeof(byte));
+			//strlen.ToString();
 
-			MMIXSTD.cread(buf);
+			//byte[] numbuf = new byte[13];
+			var numbuf = UInt32ToDecStr((uint)strlen);
+			cwrite(numbuf);
+			delarr(numbuf);
 
-			fixed (byte* bufp = &buf[0])
-			{
-				//MMIXSTD.cread(bufp, (ulong)buf.Length);
-				MMIXSTD.cwrite(bufp);
-			}
-			MMIXSTD.delarr(buf);
+			//fixed (byte* bufp = &buf[0])
+			//{
+			//	//MMIXSTD.cread(bufp, (ulong)buf.Length);
+			//	cwrite(bufp);
+			//}
 		}
 
-		public static int Dummy(int x)
+		public static int Strlen(byte[] str)
 		{
-			return x * 2;
+			for (int i = 0; ; i++)
+			{
+				if (str[i] == 0)
+					return i;
+			}
 		}
+
+		public static void Itoa(int num, byte[] buf)
+		{
+			int pos = 0;
+			do
+			{
+				var digit = num % 10;
+				num /= 10;
+				buf[pos++] = (byte)('0' + digit);
+			} while (num > 0);
+			buf[pos] = 0;
+		}
+
+		internal static unsafe byte[] UInt32ToDecStr(uint value)
+		{
+			// Intrinsified in mono interpreter
+			int bufferLength = CountDigits(value);
+
+			byte[] result = new byte[bufferLength];
+			fixed (byte* buffer = result)
+			{
+				byte* p = buffer + bufferLength;
+				do
+				{
+					uint remainder = value % 10;
+					value /= 10;
+					*(--p) = (byte)(remainder + '0');
+				}
+				while (value != 0);
+			}
+			return result;
+		}
+
+		public static int CountDigits(uint value)
+		{
+			int digits = 1;
+			if (value >= 100000)
+			{
+				value /= 100000;
+				digits += 5;
+			}
+
+			if (value < 10) { /* no-op */ }
+			else if (value < 100) { digits++; }
+			else if (value < 1000) { digits += 2; }
+			else if (value < 10000) { digits += 3; }
+			else { digits += 4; }
+
+			return digits;
+		}
+
+		//public static int Dummy(int x)
+		//{
+		//	return x * 2;
+		//}
 
 		/*public static ulong Atoi(byte[] input)
 		{
@@ -68,45 +135,67 @@ namespace TestCode
 				curNode = curNode->next;
 
 			var newNodePtr = (MemAllocNode*)((ulong)curNode + curNode->size);
-			newNodePtr->next = (MemAllocNode*)0;
-			newNodePtr->size = toAlloc;
-			if (newNodePtr != curNode)
-				curNode->next = newNodePtr;
+			if (curNode->next == null)
+			{
+				if (curNode->prev == null)
+				{
+					curNode->size = (ulong)sizeof(MemAllocNode);
+					newNodePtr += 1;
+				}
 
+				curNode->next = newNodePtr;
+				newNodePtr->prev = curNode;
+				newNodePtr->next = null;
+			}
+			else
+			{
+				newNodePtr->prev = curNode;
+				newNodePtr->next = curNode->next;
+
+				curNode->next->prev = newNodePtr;
+				curNode->next = newNodePtr;
+			}
+			newNodePtr->size = toAlloc;
 			return newNodePtr + 1;
 		}
 
-		public static unsafe void free(void* mem) { }
+		public static unsafe void free(void* mem)
+		{
+			var node = ((MemAllocNode*)mem) - 1;
+			node->prev->next = node->next;
+
+		}
 		//public static extern T[] newarr<T>(ulong size, ulong elemSize);
 
 #if DEBUG
 		public static void cread(byte[] buf) { }
-		public static void cwrite(byte* buf) { }
+		public static void cwrite(byte[] buf) { }
 		public static void delarr<T>(T[] mem) { }
 #else
 		public static extern void cread(byte[] buf);
-		public static extern void cwrite(byte* buf);
+		public static extern void cwrite(byte[] buf);
 		public static extern void delarr<T>(T[] mem);
 #endif
 	}
 
 	public static unsafe class MMIXTYP
 	{
-		public static bool pBool;
-		public static sbyte pI8;
-		public static short pI16;
-		public static int pI32;
-		public static long pI64;
-		public static byte pU8;
-		public static ushort pU16;
-		public static uint pU32;
-		public static ulong pU64;
-		public static void* pPtr;
-		public static System.Array pArr;
+		public static readonly bool pBool;
+		public static readonly sbyte pI8;
+		public static readonly short pI16;
+		public static readonly int pI32;
+		public static readonly long pI64;
+		public static readonly byte pU8;
+		public static readonly ushort pU16;
+		public static readonly uint pU32;
+		public static readonly ulong pU64;
+		public static readonly void* pPtr;
+		public static readonly System.Array pArr;
 	}
 
 	public unsafe struct MemAllocNode
 	{
+		public MemAllocNode* prev;
 		public MemAllocNode* next;
 		public ulong size;
 	}
