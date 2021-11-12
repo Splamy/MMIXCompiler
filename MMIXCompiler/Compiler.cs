@@ -45,19 +45,19 @@ internal class Compiler
 		var asm = AssemblyDefinition.ReadAssembly(data);
 		var module = asm.MainModule;
 
-		var stdType = module.Types.FirstOrDefault(x => x.Name == "MMIXTYP");
+		var stdType = module.Types.FirstOrDefault(x => x.Name == "MMIXTYP")!;
 
-		primBool = stdType.Fields.FirstOrDefault(x => x.Name == "pBool").FieldType;
-		primI8 = stdType.Fields.FirstOrDefault(x => x.Name == "pI8").FieldType;
-		primI16 = stdType.Fields.FirstOrDefault(x => x.Name == "pI16").FieldType;
-		primI32 = stdType.Fields.FirstOrDefault(x => x.Name == "pI32").FieldType;
-		primI64 = stdType.Fields.FirstOrDefault(x => x.Name == "pI64").FieldType;
-		primU8 = stdType.Fields.FirstOrDefault(x => x.Name == "pU8").FieldType;
-		primU16 = stdType.Fields.FirstOrDefault(x => x.Name == "pU16").FieldType;
-		primU32 = stdType.Fields.FirstOrDefault(x => x.Name == "pU32").FieldType;
-		primU64 = stdType.Fields.FirstOrDefault(x => x.Name == "pU64").FieldType;
-		primPtr = stdType.Fields.FirstOrDefault(x => x.Name == "pPtr").FieldType;
-		primArr = stdType.Fields.FirstOrDefault(x => x.Name == "pArr").FieldType;
+		primBool = stdType.Fields.FirstOrDefault(x => x.Name == "pBool")!.FieldType;
+		primI8 = stdType.Fields.FirstOrDefault(x => x.Name == "pI8")!.FieldType;
+		primI16 = stdType.Fields.FirstOrDefault(x => x.Name == "pI16")!.FieldType;
+		primI32 = stdType.Fields.FirstOrDefault(x => x.Name == "pI32")!.FieldType;
+		primI64 = stdType.Fields.FirstOrDefault(x => x.Name == "pI64")!.FieldType;
+		primU8 = stdType.Fields.FirstOrDefault(x => x.Name == "pU8")!.FieldType;
+		primU16 = stdType.Fields.FirstOrDefault(x => x.Name == "pU16")!.FieldType;
+		primU32 = stdType.Fields.FirstOrDefault(x => x.Name == "pU32")!.FieldType;
+		primU64 = stdType.Fields.FirstOrDefault(x => x.Name == "pU64")!.FieldType;
+		primPtr = stdType.Fields.FirstOrDefault(x => x.Name == "pPtr")!.FieldType;
+		primArr = stdType.Fields.FirstOrDefault(x => x.Name == "pArr")!.FieldType;
 
 		foreach (var type in module.Types)
 		{
@@ -136,7 +136,7 @@ internal class Compiler
 	{
 		var strb = new StringBuilder();
 
-		strb.GenNopCom(method.Name, "() [] = ?");
+		strb.GenNop(method.Name, "() [] = ?");
 
 		var stack = CalcStack(method);
 
@@ -267,7 +267,7 @@ internal class Compiler
 			break;
 		case Code.Ldnull:
 			stack.Push(primPtr);
-			strb.Lbl(lbl).OpSET(stack.Reg(), 0);
+			strb.Lbl(lbl).GenLoadConst("", stack.Reg(), 0);
 			break;
 		case Code.Ldc_I4_M1:
 		case Code.Ldc_I4_0:
@@ -334,7 +334,7 @@ internal class Compiler
 			{
 				if (method.Name == "Main")
 				{
-					strb.Lbl(lbl).OpSET(255.Reg(), 0);
+					strb.Lbl(lbl).GenLoadConst("", 255.Reg(), 0);
 					strb.GenOp("", "TRAP", "0", "Halt", "0");
 				}
 				else
@@ -348,8 +348,9 @@ internal class Compiler
 
 				strb.GenNop(lbl);
 
-				StackMove(strb, stack.DynEndOffset.Octets - 1, stack.Return.BlockOffset + stack.Return.BlockSize - 1, 1);
-				StackMove(strb, stack.DynEndOffset.Octets - stack.Return.BlockSize - 1, stack.Return.BlockOffset, stack.Return.BlockSize - 1);
+				var stackReturn = stack.DynEndOffset.Octets - stack.Return.BlockSize;
+				StackMove(strb, stackReturn, stack.Return.BlockOffset + stack.Return.BlockSize - 1, 1); // Move the 'primary' result reg
+				StackMove(strb, stackReturn + 1, stack.Return.BlockOffset, stack.Return.BlockSize - 1);
 				strb.GenOp("", "POP", stack.Return.Elements[0].Size.Octets.ToString(), "0");
 			}
 			for (int i = 0; i < stack.Return.Count; i++)
@@ -1264,21 +1265,15 @@ internal static class Ext
 		strb.AppendLine();
 	}
 
-	public static void GenNop(this StringBuilder strb, string label)
+	public static void GenNop(this StringBuilder strb, string label, string? text = null)
 	{
-		if (!string.IsNullOrEmpty(label))
+		if (!string.IsNullOrEmpty(label) || !string.IsNullOrEmpty(text))
 		{
 			strb.Append(label).Append(' ').Append("SWYM");
+			if (!string.IsNullOrEmpty(text))
+				strb.Append(" % ").Append(text);
 			strb.AppendLine();
 		}
-	}
-
-	public static void GenNopCom(this StringBuilder strb, string label, string text = null)
-	{
-		strb.Append(label).Append(' ').Append("SWYM");
-		if (text != null)
-			strb.Append(" % ").Append(text);
-		strb.AppendLine();
 	}
 
 	public static void GenCom(this StringBuilder strb, string text)
@@ -1332,43 +1327,36 @@ internal static class Ext
 	public static Reg Reg(this int num) { if (num > 255) throw new ArgumentOutOfRangeException(nameof(num)); return ((byte)num).Reg(); }
 	public static Reg Reg(this byte num) => new(num);
 
-	public static Size Size(this TypeReference tref) => Compiler.GetSize(tref);
-
-	public static bool IsCondJump(this Code code) => false
-		|| code == Code.Brfalse
-		|| code == Code.Brfalse_S
-		|| code == Code.Brtrue
-		|| code == Code.Brtrue_S
-		|| code == Code.Beq
-		|| code == Code.Beq_S
-		|| code == Code.Bge
-		|| code == Code.Bge_S
-		|| code == Code.Bge_Un
-		|| code == Code.Bge_Un_S
-		|| code == Code.Bgt
-		|| code == Code.Bgt_S
-		|| code == Code.Bgt_Un
-		|| code == Code.Bgt_Un_S
-		|| code == Code.Ble
-		|| code == Code.Ble_S
-		|| code == Code.Ble_Un
-		|| code == Code.Ble_Un_S
-		|| code == Code.Blt
-		|| code == Code.Blt_S
-		|| code == Code.Blt_Un
-		|| code == Code.Blt_Un_S
-		|| code == Code.Bne_Un
-		|| code == Code.Bne_Un_S;
-	public static bool IsUnCondJump(this Code code) => code == Code.Br || code == Code.Br_S;
+	private static readonly HashSet<Code> ConditionalJumpOpcodes = new()
+	{
+		Code.Brfalse,
+		Code.Brfalse_S,
+		Code.Brtrue,
+		Code.Brtrue_S,
+		Code.Beq,
+		Code.Beq_S,
+		Code.Bge,
+		Code.Bge_S,
+		Code.Bge_Un,
+		Code.Bge_Un_S,
+		Code.Bgt,
+		Code.Bgt_S,
+		Code.Bgt_Un,
+		Code.Bgt_Un_S,
+		Code.Ble,
+		Code.Ble_S,
+		Code.Ble_Un,
+		Code.Ble_Un_S,
+		Code.Blt,
+		Code.Blt_S,
+		Code.Blt_Un,
+		Code.Blt_Un_S,
+		Code.Bne_Un,
+		Code.Bne_Un_S,
+	};
+	public static bool IsCondJump(this Code code) => ConditionalJumpOpcodes.Contains(code);
+	public static bool IsUnCondJump(this Code code) => code is Code.Br or Code.Br_S;
 	public static bool IsJump(this Code code) => code.IsCondJump() || code.IsUnCondJump();
-
-	public static void OpSET(this StringBuilder strb, Reg x, ushort yz) => strb.GenOpClear("SET", x, yz.ToString());
-	public static void OpSET(this StringBuilder strb, Reg x, Reg y) => strb.GenOpClear("SET", x, y);
-
-	/// <summary>SETL: u($X) ← YZ</summary>
-	public static void OpSETL(this StringBuilder strb, Reg x, ushort yz) => strb.GenOpClear("SETL", x, yz.ToString());
-	/// <summary>SETL: $X ← $Y | $Z</summary>
-	public static void OpOR(this StringBuilder strb, Reg x, Reg y, Reg z) => strb.GenOpClear("OR", x, y, z);
 }
 
 class Reg

@@ -6,6 +6,17 @@ namespace TestCode
 	{
 		public static void Main(int argc, byte** argv)
 		{
+			byte[] readbuf = new byte[256];
+
+			cread(readbuf);
+			ulong iter = Atoi(readbuf);
+			var i = 0UL;
+			for (; i < iter; i++) {
+				readbuf[i] = (byte)'*';
+			}
+			readbuf[i] = 0;
+			cwrite(readbuf);
+
 			/*byte* fLine = null;
 			long iter = Atoi(fLine);
 			for(long i = 0L; i < 3; i++)
@@ -19,7 +30,6 @@ namespace TestCode
 				}
 			}*/
 
-			byte[] readbuf = new byte[13]; // MMIXSTD.newarr<byte>(32, sizeof(byte));
 			cread(readbuf);
 			var strlen = Strlen(readbuf);
 			cwrite(readbuf);
@@ -103,7 +113,7 @@ namespace TestCode
 		//	return x * 2;
 		//}
 
-		/*public static ulong Atoi(byte[] input)
+		public static ulong Atoi(byte[] input)
 		{
 			ulong x = 0L;
 			for (ulong i = 0L; input[i] >= '0'; i++)
@@ -112,7 +122,7 @@ namespace TestCode
 				x += (ulong)(input[i] - (byte)'0');
 			}
 			return x;
-		}*/
+		}
 	}
 
 #pragma warning disable CS0626, IDE1006
@@ -165,7 +175,6 @@ namespace TestCode
 			node->prev->next = node->next;
 
 		}
-		//public static extern T[] newarr<T>(ulong size, ulong elemSize);
 
 #if DEBUG
 		public static void cread(byte[] buf) { }
