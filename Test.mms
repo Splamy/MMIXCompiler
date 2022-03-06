@@ -1,7 +1,3 @@
-        LOC     Data_Segment
-        GREG    @
-InputE  OCTA    0
-
  LOC #100
 Main SWYM % () [] = ?
  SET $2,42
@@ -67,7 +63,7 @@ newarr SWYM
  MUL $4,$0,$1
  ADD $4,$4,8
  PUSHJ $3,malloc
- LDA $3,InputE
+ LDA $3,$0
  SET $0,32
  STO $0,$3,0
  ADD $0,$3,8
@@ -80,3 +76,7 @@ delarr SWYM
  SET $0,$3
  PUT rJ,$2
  POP
+
+	LOC     #288
+	BYTE "abcdedddddddddddddddddddddddddddddddg",0,"sdf"
+	GREG    @

@@ -3,6 +3,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Emit;
 using Microsoft.CodeAnalysis.Text;
+using MMIXCompiler.Compiler;
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -17,7 +18,7 @@ namespace MMIXCompiler;
 
 public partial class Form1 : Form
 {
-    readonly Compiler c = new();
+    readonly CodeGenerator c = new();
     readonly Random rnd = new();
     ImmutableArray<Diagnostic> errors = ImmutableArray<Diagnostic>.Empty;
 
