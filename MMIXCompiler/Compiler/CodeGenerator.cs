@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 
 namespace MMIXCompiler.Compiler;
@@ -23,17 +24,41 @@ internal class CodeGenerator
     public static readonly Dictionary<string, Size> TypeSizes = new();
     public readonly Dictionary<string, Size> FieldOffsets = new();
 
-    public static TypeReference primBool = default!;
-    public static TypeReference primI8 = default!;
-    public static TypeReference primI16 = default!;
-    public static TypeReference primI32 = default!;
-    public static TypeReference primI64 = default!;
-    public static TypeReference primU8 = default!;
-    public static TypeReference primU16 = default!;
-    public static TypeReference primU32 = default!;
-    public static TypeReference primU64 = default!;
-    public static TypeReference primPtr = default!;
-    public static TypeReference primArr = default!;
+    public static readonly TypeReference primVoid;
+    public static readonly TypeReference primBool;
+    public static readonly TypeReference primI8;
+    public static readonly TypeReference primI16;
+    public static readonly TypeReference primI32;
+    public static readonly TypeReference primI64;
+    public static readonly TypeReference primU8;
+    public static readonly TypeReference primU16;
+    public static readonly TypeReference primU32;
+    public static readonly TypeReference primU64;
+    public static readonly TypeReference primPtr;
+    public static readonly TypeReference primArr;
+
+    static CodeGenerator()
+    {
+        var mscoreAssembly = AssemblyDefinition.ReadAssembly(typeof(object).Assembly.Location);
+        var mxstdAssembly = AssemblyDefinition.ReadAssembly(typeof(MMIXMarker).Assembly.Location);
+        var mxstdModule = mxstdAssembly.MainModule;
+        var mscoreModule = mscoreAssembly.MainModule;
+
+#pragma warning disable IDE0049
+        primVoid = mscoreModule.GetType(typeof(void).FullName);
+        primBool = mscoreModule.GetType(typeof(bool).FullName);
+        primI8 =  mscoreModule.GetType(typeof(SByte).FullName);
+        primI16 = mscoreModule.GetType(typeof(Int16).FullName);
+        primI32 = mscoreModule.GetType(typeof(Int32).FullName);
+        primI64 = mscoreModule.GetType(typeof(Int64).FullName);
+        primU8 =  mscoreModule.GetType(typeof(Byte).FullName);
+        primU16 = mscoreModule.GetType(typeof(UInt16).FullName);
+        primU32 = mscoreModule.GetType(typeof(UInt32).FullName);
+        primU64 = mscoreModule.GetType(typeof(UInt64).FullName);
+        primPtr = mscoreModule.GetType(typeof(UIntPtr).FullName);
+        primArr = mscoreModule.GetType(typeof(Array).FullName);
+#pragma warning restore IDE0049
+    }
 
     public string Compile(Stream data)
     {
@@ -48,26 +73,9 @@ internal class CodeGenerator
         var asm = AssemblyDefinition.ReadAssembly(data);
         var module = asm.MainModule;
 
-        var stdType = module.Types.FirstOrDefault(x => x.Name == "MMIXTYP")!;
-
-        primBool = stdType.Fields.FirstOrDefault(x => x.Name == "pBool")!.FieldType;
-        primI8 = stdType.Fields.FirstOrDefault(x => x.Name == "pI8")!.FieldType;
-        primI16 = stdType.Fields.FirstOrDefault(x => x.Name == "pI16")!.FieldType;
-        primI32 = stdType.Fields.FirstOrDefault(x => x.Name == "pI32")!.FieldType;
-        primI64 = stdType.Fields.FirstOrDefault(x => x.Name == "pI64")!.FieldType;
-        primU8 = stdType.Fields.FirstOrDefault(x => x.Name == "pU8")!.FieldType;
-        primU16 = stdType.Fields.FirstOrDefault(x => x.Name == "pU16")!.FieldType;
-        primU32 = stdType.Fields.FirstOrDefault(x => x.Name == "pU32")!.FieldType;
-        primU64 = stdType.Fields.FirstOrDefault(x => x.Name == "pU64")!.FieldType;
-        primPtr = stdType.Fields.FirstOrDefault(x => x.Name == "pPtr")!.FieldType;
-        primArr = stdType.Fields.FirstOrDefault(x => x.Name == "pArr")!.FieldType;
-
         foreach (var type in module.Types)
         {
             if (!type.IsClass)
-                continue;
-
-            if (type.Name == "MMIXTYP")
                 continue;
 
             foreach (var method in type.Methods)
@@ -216,7 +224,7 @@ internal class CodeGenerator
 
         foreach (var (str, addr) in StaticStrings)
         {
-            strb.GenOp("", "LOC", $"{addr.Address.Bytes8Long:X}");
+            strb.GenOp("", "LOC", $"{addr.Address.Ptr:X2}");
             // String struct
             strb.GenOp("", "OCTA", "0,0");
             // String Data
@@ -606,7 +614,7 @@ internal class CodeGenerator
                     var regPtr = stack.Reg(0, 0);
                     var regLength = stack.Reg(0, 1);
 
-                    strb.GenLoadConst(lbl, regPtr, strAlloc.Address.Bytes);
+                    strb.GenLoadConst(lbl, regPtr, strAlloc.Address.Ptr);
                 }
                 break;
             case Code.Newobj: NotImplemented(instruct, strb); break;
@@ -628,7 +636,7 @@ internal class CodeGenerator
                         sourceAddressReg = stack.Reg();
                         stack.Pop();
                         var staticAddr = GetStaticFieldAddress(fld);
-                        strb.GenLoadConst(lbl, sourceAddressReg, staticAddr.Bytes);
+                        strb.GenLoadConst(lbl, sourceAddressReg, staticAddr.Ptr);
                         fieldOffset = 0;
                     }
                     else
@@ -677,7 +685,7 @@ internal class CodeGenerator
                         stack.Push(primU64);
                         targetAddressReg = stack.Reg(0);
                         regNum = 1;
-                        strb.GenLoadConst(lbl, targetAddressReg, staticAddr.Bytes);
+                        strb.GenLoadConst(lbl, targetAddressReg, staticAddr.Ptr);
                         fieldOffset = 0;
                     }
                     else
@@ -707,7 +715,7 @@ internal class CodeGenerator
                     var fld = (FieldDefinition)instruct.Operand;
                     var staticAddr = GetStaticFieldAddress(fld);
                     stack.Push(primU64);
-                    strb.GenLoadConst(lbl, stack.Reg(), staticAddr.Bytes);
+                    strb.GenLoadConst(lbl, stack.Reg(), staticAddr.Ptr);
                 }
                 break;
             case Code.Stobj: NotImplemented(instruct, strb); break;
@@ -987,7 +995,7 @@ internal class CodeGenerator
             return Size.FromBytes(AddrSize * 2);
         if (type.FullName == "System.String")
             return Size.FromBytes(AddrSize * 2);
-        if (type.IsPointer)
+        if (type.IsPointer || type.Equals(primPtr))
             return Size.FromBytes(AddrSize);
         if (type.IsPinned)
         {

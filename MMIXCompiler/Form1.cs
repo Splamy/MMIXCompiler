@@ -4,6 +4,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Emit;
 using Microsoft.CodeAnalysis.Text;
 using MMIXCompiler.Compiler;
+using Mono.Cecil;
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -60,16 +61,18 @@ public partial class Form1 : Form
     {
         var code = textEditorControl1.Text;
         var sourceTree = CSharpSyntaxTree.ParseText(SourceText.From(code));
+        var mmixStd = CSharpSyntaxTree.ParseText(SourceText.From(File.ReadAllText("../../../../MMIXStd/StdLib.cs")));
 
         var compilation = CSharpCompilation.Create($"mmix_{rnd.Next()}")
             .WithOptions(new CSharpCompilationOptions(
+
                 outputKind: OutputKind.DynamicallyLinkedLibrary,
                 optimizationLevel: OptimizationLevel.Release,
                 allowUnsafe: true))
             .AddReferences(
-                MetadataReference.CreateFromFile(typeof(object).GetTypeInfo().Assembly.Location)
+                MetadataReference.CreateFromFile(typeof(object).Assembly.Location)
             )
-            .AddSyntaxTrees(sourceTree);
+            .AddSyntaxTrees(mmixStd, sourceTree);
 
         using var ms_assembly = new MemoryStream();
         using var ms_pdb = new MemoryStream();
